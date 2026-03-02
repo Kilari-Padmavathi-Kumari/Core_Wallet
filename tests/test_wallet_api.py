@@ -44,17 +44,25 @@ def test_health(client: TestClient):
     assert "environment" in data
 
 
+def auth_headers(client: TestClient, user_id: str) -> dict[str, str]:
+    login = client.post("/auth/login", json={"user_id": user_id})
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_create_wallet_and_duplicate(client: TestClient):
     user_id = f"user-{secrets.token_hex(4)}"
     create_user = client.post("/users", json={"user_id": user_id})
     assert create_user.status_code == 201
+    headers = auth_headers(client, user_id)
 
-    response = client.post("/wallets", json={"user_id": user_id})
+    response = client.post("/wallets", json={"user_id": user_id}, headers=headers)
     assert response.status_code == 201
     assert Decimal(response.json()["balance"]) == Decimal("0.00")
     assert "created_at" in response.json()
 
-    duplicate = client.post("/wallets", json={"user_id": user_id})
+    duplicate = client.post("/wallets", json={"user_id": user_id}, headers=headers)
     assert duplicate.status_code == 409
 
 
@@ -82,25 +90,27 @@ def test_credit_debit_balance_and_ledger(client: TestClient):
     user_id = f"user-{secrets.token_hex(4)}"
     create_user = client.post("/users", json={"user_id": user_id})
     assert create_user.status_code == 201
-    assert client.post("/wallets", json={"user_id": user_id}).status_code == 201
+    headers = auth_headers(client, user_id)
+    assert client.post("/wallets", json={"user_id": user_id}, headers=headers).status_code == 201
 
     c1 = client.post(
         f"/wallets/{user_id}/credit",
         json={"amount": "100.00"},
+        headers=headers,
     )
     assert c1.status_code == 200
     assert Decimal(c1.json()["balance"]) == Decimal("100.00")
 
-    d1 = client.post(f"/wallets/{user_id}/debit", json={"amount": "40.00"})
+    d1 = client.post(f"/wallets/{user_id}/debit", json={"amount": "40.00"}, headers=headers)
     assert d1.status_code == 200
     assert Decimal(d1.json()["balance"]) == Decimal("60.00")
 
-    balance = client.get(f"/wallets/{user_id}/balance")
+    balance = client.get(f"/wallets/{user_id}/balance", headers=headers)
     assert balance.status_code == 200
     assert Decimal(balance.json()["balance"]) == Decimal("60.00")
     assert "created_at" in balance.json()
 
-    ledger = client.get(f"/wallets/{user_id}/ledger")
+    ledger = client.get(f"/wallets/{user_id}/ledger", headers=headers)
     assert ledger.status_code == 200
     entries = ledger.json()
     assert len(entries) == 2
@@ -111,24 +121,26 @@ def test_debit_rejected_when_insufficient(client: TestClient):
     user_id = f"user-{secrets.token_hex(4)}"
     create_user = client.post("/users", json={"user_id": user_id})
     assert create_user.status_code == 201
-    assert client.post("/wallets", json={"user_id": user_id}).status_code == 201
+    headers = auth_headers(client, user_id)
+    assert client.post("/wallets", json={"user_id": user_id}, headers=headers).status_code == 201
     assert (
         client.post(
             f"/wallets/{user_id}/credit",
             json={"amount": "10.00"},
+            headers=headers,
         ).status_code
         == 200
     )
 
-    fail = client.post(f"/wallets/{user_id}/debit", json={"amount": "15.00"})
+    fail = client.post(f"/wallets/{user_id}/debit", json={"amount": "15.00"}, headers=headers)
     assert fail.status_code == 400
     assert fail.json()["detail"] == "insufficient funds"
 
-    balance = client.get(f"/wallets/{user_id}/balance")
+    balance = client.get(f"/wallets/{user_id}/balance", headers=headers)
     assert Decimal(balance.json()["balance"]) == Decimal("10.00")
     assert "created_at" in balance.json()
 
-    ledger = client.get(f"/wallets/{user_id}/ledger")
+    ledger = client.get(f"/wallets/{user_id}/ledger", headers=headers)
     assert len(ledger.json()) == 1
     assert ledger.json()[0]["entry_type"] == "credit"
 
@@ -144,11 +156,13 @@ def test_concurrent_debit_consistency(client: TestClient):
     expected_failures = 40
 
     assert client.post("/users", json={"user_id": user_id}).status_code == 201
-    assert client.post("/wallets", json={"user_id": user_id}).status_code == 201
+    headers = auth_headers(client, user_id)
+    assert client.post("/wallets", json={"user_id": user_id}, headers=headers).status_code == 201
     assert (
         client.post(
             f"/wallets/{user_id}/credit",
             json={"amount": str(initial_balance)},
+            headers=headers,
         ).status_code
         == 200
     )
@@ -157,6 +171,7 @@ def test_concurrent_debit_consistency(client: TestClient):
         return client.post(
             f"/wallets/{user_id}/debit",
             json={"amount": str(debit_amount)},
+            headers=headers,
         ).status_code
 
     statuses: list[int] = []
@@ -181,11 +196,11 @@ def test_concurrent_debit_consistency(client: TestClient):
         f"Expected {request_count} total debit responses, got {len(statuses)}"
     )
 
-    balance = client.get(f"/wallets/{user_id}/balance")
+    balance = client.get(f"/wallets/{user_id}/balance", headers=headers)
     assert balance.status_code == 200
     assert Decimal(balance.json()["balance"]) == Decimal("0.00")
 
-    ledger = client.get(f"/wallets/{user_id}/ledger?limit=200")
+    ledger = client.get(f"/wallets/{user_id}/ledger?limit=200", headers=headers)
     assert ledger.status_code == 200
     entries = ledger.json()
     debit_entries = [entry for entry in entries if entry["entry_type"] == "debit"]
@@ -196,8 +211,37 @@ def test_concurrent_debit_consistency(client: TestClient):
     assert len(credit_entries) == 1
 
 
-def test_create_wallet_requires_existing_user(client: TestClient):
+def test_create_wallet_blocks_cross_user_create(client: TestClient):
     user_id = f"user-{secrets.token_hex(4)}"
+    owner_id = f"user-{secrets.token_hex(4)}"
+    assert client.post("/users", json={"user_id": owner_id}).status_code == 201
+    headers = auth_headers(client, owner_id)
+    response = client.post("/wallets", json={"user_id": user_id}, headers=headers)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "forbidden"
+
+
+def test_wallet_routes_require_jwt(client: TestClient):
+    user_id = f"user-{secrets.token_hex(4)}"
+    assert client.post("/users", json={"user_id": user_id}).status_code == 201
     response = client.post("/wallets", json={"user_id": user_id})
-    assert response.status_code == 404
-    assert response.json()["detail"] == "user not found"
+    assert response.status_code == 403
+
+
+def test_wallet_authorization_blocks_other_user_access(client: TestClient):
+    owner = f"user-{secrets.token_hex(4)}"
+    other = f"user-{secrets.token_hex(4)}"
+    assert client.post("/users", json={"user_id": owner}).status_code == 201
+    assert client.post("/users", json={"user_id": other}).status_code == 201
+
+    owner_headers = auth_headers(client, owner)
+    other_headers = auth_headers(client, other)
+    assert client.post("/wallets", json={"user_id": owner}, headers=owner_headers).status_code == 201
+    assert (
+        client.post(f"/wallets/{owner}/credit", json={"amount": "25.00"}, headers=owner_headers).status_code
+        == 200
+    )
+
+    blocked = client.get(f"/wallets/{owner}/balance", headers=other_headers)
+    assert blocked.status_code == 403
+    assert blocked.json()["detail"] == "forbidden"

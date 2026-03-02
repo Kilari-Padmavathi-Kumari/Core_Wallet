@@ -1,8 +1,9 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from psycopg.rows import dict_row
 
+from auth import get_current_user_id
 from db import pool
 from schemas import (
     CreateUserRequest,
@@ -18,8 +19,28 @@ logger = logging.getLogger("wallet.routes")
 router = APIRouter()
 
 
+def _ensure_user_exists(cur, user_id: str) -> bool:
+    """Check whether user exists in users table."""
+    cur.execute("SELECT 1 FROM users WHERE user_id = %s;", (user_id,))
+    exists = cur.fetchone() is not None
+    logger.debug("user_exists_check user_id=%s exists=%s", user_id, exists)
+    return exists
+
+
+def _authorize_owner(token_user_id: str, requested_user_id: str) -> None:
+    """Allow wallet operation only for token owner."""
+    if token_user_id != requested_user_id:
+        logger.warning(
+            "wallet_forbidden token_user_id=%s requested_user_id=%s",
+            token_user_id,
+            requested_user_id,
+        )
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
 @router.post("/users", response_model=UserResponse, status_code=201, tags=["users"])
 def create_user(payload: CreateUserRequest) -> UserResponse:
+    # Create a user profile row.
     user_id_str = payload.user_id
     logger.info("create_user_requested user_id=%s", user_id_str)
     with pool.connection() as conn:
@@ -49,6 +70,7 @@ def list_users(
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[UserResponse]:
+    # List users with pagination.
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -67,6 +89,7 @@ def list_users(
 
 @router.get("/users/{user_id}", response_model=UserResponse, tags=["users"])
 def get_user(user_id: str) -> UserResponse:
+    # Get one user by id.
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -82,19 +105,17 @@ def get_user(user_id: str) -> UserResponse:
 
 
 @router.post("/wallets", response_model=WalletBalanceResponse, status_code=201, tags=["wallet"])
-def create_wallet(payload: CreateWalletRequest) -> WalletBalanceResponse:
+def create_wallet(
+    payload: CreateWalletRequest,
+    token_user_id: str = Depends(get_current_user_id),
+) -> WalletBalanceResponse:
+    # Create wallet for an existing user.
     user_id_str = str(payload.user_id)
+    _authorize_owner(token_user_id, user_id_str)
     logger.info("create_wallet_requested user_id=%s", user_id_str)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                SELECT 1 FROM users WHERE user_id = %s;
-                """,
-                (user_id_str,),
-            )
-            user_exists = cur.fetchone()
-            if user_exists is None:
+            if not _ensure_user_exists(cur, user_id_str):
                 conn.rollback()
                 logger.warning("create_wallet_user_not_found user_id=%s", user_id_str)
                 raise HTTPException(status_code=404, detail="user not found")
@@ -120,81 +141,93 @@ def create_wallet(payload: CreateWalletRequest) -> WalletBalanceResponse:
 
 
 @router.post("/wallets/{user_id}/credit", response_model=WalletMutationResponse, tags=["wallet"])
-def credit_wallet(user_id: str, payload: MoneyRequest) -> WalletMutationResponse:
+def credit_wallet(
+    user_id: str,
+    payload: MoneyRequest,
+    token_user_id: str = Depends(get_current_user_id),
+) -> WalletMutationResponse:
+    # Credit flow:
+    # 1) update wallet balance
+    # 2) add ledger row in same DB transaction
     user_id_str = user_id
+    _authorize_owner(token_user_id, user_id_str)
     logger.info("credit_requested user_id=%s amount=%s", user_id_str, payload.amount)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                WITH updated AS (
-                    UPDATE wallets
-                    SET balance = balance + %s
-                    WHERE user_id = %s
-                    RETURNING id, balance
-                ),
-                inserted AS (
-                    INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
-                    SELECT id, 'credit', %s, balance
-                    FROM updated
-                    RETURNING id
-                )
-                SELECT
-                    (SELECT balance FROM updated) AS balance,
-                    (SELECT id FROM inserted) AS transaction_id;
+                UPDATE wallets
+                SET balance = balance + %s
+                WHERE user_id = %s
+                RETURNING id, balance;
                 """,
-                (payload.amount, user_id_str, payload.amount),
+                (payload.amount, user_id_str),
             )
-            mutation = cur.fetchone()
-            if mutation is None or mutation["transaction_id"] is None:
+            updated_wallet = cur.fetchone()
+            if updated_wallet is None:
                 conn.rollback()
                 logger.warning("credit_wallet_not_found user_id=%s", user_id_str)
                 raise HTTPException(status_code=404, detail="wallet not found")
+
+            cur.execute(
+                """
+                INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
+                VALUES (%s, 'credit', %s, %s)
+                RETURNING id;
+                """,
+                (updated_wallet["id"], payload.amount, updated_wallet["balance"]),
+            )
+            ledger_row = cur.fetchone()
+            transaction_id = ledger_row["id"]
+            balance = updated_wallet["balance"]
+            logger.debug(
+                "credit_debug user_id=%s wallet_id=%s transaction_id=%s balance=%s",
+                user_id_str,
+                updated_wallet["id"],
+                transaction_id,
+                balance,
+            )
             conn.commit()
 
     logger.info(
         "credit_success user_id=%s transaction_id=%s balance=%s",
         user_id_str,
-        mutation["transaction_id"],
-        mutation["balance"],
+        transaction_id,
+        balance,
     )
     return WalletMutationResponse(
         user_id=user_id_str,
-        balance=mutation["balance"],
-        transaction_id=mutation["transaction_id"],
+        balance=balance,
+        transaction_id=transaction_id,
     )
 
 
 @router.post("/wallets/{user_id}/debit", response_model=WalletMutationResponse, tags=["wallet"])
-def debit_wallet(user_id: str, payload: MoneyRequest) -> WalletMutationResponse:
+def debit_wallet(
+    user_id: str,
+    payload: MoneyRequest,
+    token_user_id: str = Depends(get_current_user_id),
+) -> WalletMutationResponse:
+    # Debit is concurrency-safe:
+    # update only succeeds when balance is enough, then add ledger in same transaction.
     user_id_str = user_id
+    _authorize_owner(token_user_id, user_id_str)
     logger.info("debit_requested user_id=%s amount=%s", user_id_str, payload.amount)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                WITH updated AS (
-                    UPDATE wallets
-                    SET balance = balance - %s
-                    WHERE user_id = %s
-                      AND balance >= %s
-                    RETURNING id, balance
-                ),
-                inserted AS (
-                    INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
-                    SELECT id, 'debit', %s, balance
-                    FROM updated
-                    RETURNING id
-                )
-                SELECT
-                    (SELECT balance FROM updated) AS balance,
-                    (SELECT id FROM inserted) AS transaction_id;
+                UPDATE wallets
+                SET balance = balance - %s
+                WHERE user_id = %s
+                  AND balance >= %s
+                RETURNING id, balance;
                 """,
-                (payload.amount, user_id_str, payload.amount, payload.amount),
+                (payload.amount, user_id_str, payload.amount),
             )
-            mutation = cur.fetchone()
+            updated_wallet = cur.fetchone()
 
-            if mutation is None or mutation["transaction_id"] is None:
+            if updated_wallet is None:
                 cur.execute("SELECT 1 FROM wallets WHERE user_id = %s", (user_id_str,))
                 exists = cur.fetchone()
                 conn.rollback()
@@ -205,24 +238,48 @@ def debit_wallet(user_id: str, payload: MoneyRequest) -> WalletMutationResponse:
                     "debit_insufficient_funds user_id=%s amount=%s", user_id_str, payload.amount
                 )
                 raise HTTPException(status_code=400, detail="insufficient funds")
+
+            cur.execute(
+                """
+                INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
+                VALUES (%s, 'debit', %s, %s)
+                RETURNING id;
+                """,
+                (updated_wallet["id"], payload.amount, updated_wallet["balance"]),
+            )
+            ledger_row = cur.fetchone()
+            transaction_id = ledger_row["id"]
+            balance = updated_wallet["balance"]
+            logger.debug(
+                "debit_debug user_id=%s wallet_id=%s transaction_id=%s balance=%s",
+                user_id_str,
+                updated_wallet["id"],
+                transaction_id,
+                balance,
+            )
             conn.commit()
 
     logger.info(
         "debit_success user_id=%s transaction_id=%s balance=%s",
         user_id_str,
-        mutation["transaction_id"],
-        mutation["balance"],
+        transaction_id,
+        balance,
     )
     return WalletMutationResponse(
         user_id=user_id_str,
-        balance=mutation["balance"],
-        transaction_id=mutation["transaction_id"],
+        balance=balance,
+        transaction_id=transaction_id,
     )
 
 
 @router.get("/wallets/{user_id}/balance", response_model=WalletBalanceResponse, tags=["wallet"])
-def get_wallet_balance(user_id: str) -> WalletBalanceResponse:
+def get_wallet_balance(
+    user_id: str,
+    token_user_id: str = Depends(get_current_user_id),
+) -> WalletBalanceResponse:
+    # Read current wallet balance.
     user_id_str = user_id
+    _authorize_owner(token_user_id, user_id_str)
     logger.info("balance_requested user_id=%s", user_id_str)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -244,8 +301,11 @@ def get_wallet_ledger(
     user_id: str,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    token_user_id: str = Depends(get_current_user_id),
 ) -> list[LedgerEntryResponse]:
+    # Read transaction history for one wallet.
     user_id_str = user_id
+    _authorize_owner(token_user_id, user_id_str)
     logger.info("ledger_requested user_id=%s limit=%s offset=%s", user_id_str, limit, offset)
     with pool.connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:

@@ -26,3 +26,7 @@ ON ledger_entries(wallet_id, created_at ASC);
 SELECT * FROM ledger_entries;
 SELECT * FROM wallets;
 SELECT * FROM users;
+
+TRUNCATE TABLE users CASCADE;
+TRUNCATE TABLE wallets CASCADE;
+TRUNCATE TABLE ledger_entries CASCADE;

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from config import MONEY_QUANT
 
+# Typed aliases used by request/response models.
 MoneyValue = Annotated[
     Decimal,
     Field(gt=0, max_digits=18, decimal_places=2, json_schema_extra={"example": "100.00"}),
@@ -29,12 +30,22 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
+class LoginRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
 class MoneyRequest(BaseModel):
     amount: MoneyValue
 
     @field_validator("amount")
     @classmethod
     def validate_amount(cls, value: Decimal) -> Decimal:
+        # Keep money in 2-decimal format (for predictable ledger values).
         if value <= 0:
             raise ValueError("amount must be greater than zero")
         return value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
