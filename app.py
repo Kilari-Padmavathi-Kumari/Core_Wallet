@@ -1,0 +1,69 @@
+import logging
+import secrets
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from config import APP_ENV, APP_NAME, APP_VERSION
+from db import db_healthcheck, init_db, pool
+from logging_setup import setup_logging
+from routes import router
+from schemas import HealthResponse
+
+setup_logging()
+logger = logging.getLogger("wallet.app")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    logger.info("app_startup_begin")
+    pool.open()
+    init_db()
+    logger.info("app_startup_complete")
+    try:
+        yield
+    finally:
+        logger.info("app_shutdown_begin")
+        pool.close()
+        logger.info("app_shutdown_complete")
+
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION, lifespan=lifespan)
+app.include_router(router)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id", secrets.token_hex(16))
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "request method=%s path=%s status=%s duration_ms=%.2f request_id=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+        request_id,
+    )
+    return response
+
+
+@app.get("/health", response_model=HealthResponse, tags=["health"])
+def health() -> HealthResponse:
+    healthy = db_healthcheck()
+    return HealthResponse(
+        status="healthy" if healthy else "unhealthy",
+        service=APP_NAME,
+        environment=APP_ENV,
+    )
+
+
+@app.exception_handler(Exception)
+def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("unhandled_exception: %s", exc)
+    return JSONResponse(status_code=500, content={"detail": "internal server error"})
