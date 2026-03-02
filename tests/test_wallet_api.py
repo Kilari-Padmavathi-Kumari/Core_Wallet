@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import sys
 import secrets
@@ -130,6 +131,69 @@ def test_debit_rejected_when_insufficient(client: TestClient):
     ledger = client.get(f"/wallets/{user_id}/ledger")
     assert len(ledger.json()) == 1
     assert ledger.json()[0]["entry_type"] == "credit"
+
+
+def test_concurrent_debit_consistency(client: TestClient):
+    user_id = f"user-{secrets.token_hex(4)}"
+    # Phase 2 required scenario:
+    # Wallet balance = 100, 50 concurrent debit requests, each debiting 10.
+    initial_balance = Decimal("100.00")
+    debit_amount = Decimal("10.00")
+    request_count = 50
+    expected_success = 10
+    expected_failures = 40
+
+    assert client.post("/users", json={"user_id": user_id}).status_code == 201
+    assert client.post("/wallets", json={"user_id": user_id}).status_code == 201
+    assert (
+        client.post(
+            f"/wallets/{user_id}/credit",
+            json={"amount": str(initial_balance)},
+        ).status_code
+        == 200
+    )
+
+    def do_debit():
+        return client.post(
+            f"/wallets/{user_id}/debit",
+            json={"amount": str(debit_amount)},
+        ).status_code
+
+    statuses: list[int] = []
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = [executor.submit(do_debit) for _ in range(request_count)]
+        for future in as_completed(futures):
+            statuses.append(future.result())
+
+    success_count = statuses.count(200)
+    insufficient_count = statuses.count(400)
+    print(
+        f"PHASE2_RESULT: successful_debits={success_count}, failed_debits={insufficient_count}"
+    )
+
+    assert success_count == expected_success, (
+        f"Expected {expected_success} successful debits, got {success_count}"
+    )
+    assert insufficient_count == expected_failures, (
+        f"Expected {expected_failures} failed debits, got {insufficient_count}"
+    )
+    assert len(statuses) == request_count, (
+        f"Expected {request_count} total debit responses, got {len(statuses)}"
+    )
+
+    balance = client.get(f"/wallets/{user_id}/balance")
+    assert balance.status_code == 200
+    assert Decimal(balance.json()["balance"]) == Decimal("0.00")
+
+    ledger = client.get(f"/wallets/{user_id}/ledger?limit=200")
+    assert ledger.status_code == 200
+    entries = ledger.json()
+    debit_entries = [entry for entry in entries if entry["entry_type"] == "debit"]
+    credit_entries = [entry for entry in entries if entry["entry_type"] == "credit"]
+    assert len(debit_entries) == expected_success, (
+        f"Expected {expected_success} debit ledger entries, got {len(debit_entries)}"
+    )
+    assert len(credit_entries) == 1
 
 
 def test_create_wallet_requires_existing_user(client: TestClient):

@@ -20,4 +20,9 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ledger_wallet_created_at
-ON ledger_entries(wallet_id, created_at DESC);
+ON ledger_entries(wallet_id, created_at ASC);
+
+
+SELECT * FROM ledger_entries;
+SELECT * FROM wallets;
+SELECT * FROM users;

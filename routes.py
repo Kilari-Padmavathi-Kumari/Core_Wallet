@@ -127,40 +127,41 @@ def credit_wallet(user_id: str, payload: MoneyRequest) -> WalletMutationResponse
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                UPDATE wallets
-                SET balance = balance + %s
-                WHERE user_id = %s
-                RETURNING id, balance;
+                WITH updated AS (
+                    UPDATE wallets
+                    SET balance = balance + %s
+                    WHERE user_id = %s
+                    RETURNING id, balance
+                ),
+                inserted AS (
+                    INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
+                    SELECT id, 'credit', %s, balance
+                    FROM updated
+                    RETURNING id
+                )
+                SELECT
+                    (SELECT balance FROM updated) AS balance,
+                    (SELECT id FROM inserted) AS transaction_id;
                 """,
-                (payload.amount, user_id_str),
+                (payload.amount, user_id_str, payload.amount),
             )
-            wallet = cur.fetchone()
-            if wallet is None:
+            mutation = cur.fetchone()
+            if mutation is None or mutation["transaction_id"] is None:
                 conn.rollback()
                 logger.warning("credit_wallet_not_found user_id=%s", user_id_str)
                 raise HTTPException(status_code=404, detail="wallet not found")
-
-            cur.execute(
-                """
-                INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
-                VALUES (%s, 'credit', %s, %s)
-                RETURNING id;
-                """,
-                (wallet["id"], payload.amount, wallet["balance"]),
-            )
-            tx = cur.fetchone()
             conn.commit()
 
     logger.info(
         "credit_success user_id=%s transaction_id=%s balance=%s",
         user_id_str,
-        tx["id"],
-        wallet["balance"],
+        mutation["transaction_id"],
+        mutation["balance"],
     )
     return WalletMutationResponse(
         user_id=user_id_str,
-        balance=wallet["balance"],
-        transaction_id=tx["id"],
+        balance=mutation["balance"],
+        transaction_id=mutation["transaction_id"],
     )
 
 
@@ -172,17 +173,28 @@ def debit_wallet(user_id: str, payload: MoneyRequest) -> WalletMutationResponse:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                UPDATE wallets
-                SET balance = balance - %s
-                WHERE user_id = %s
-                  AND balance >= %s
-                RETURNING id, balance;
+                WITH updated AS (
+                    UPDATE wallets
+                    SET balance = balance - %s
+                    WHERE user_id = %s
+                      AND balance >= %s
+                    RETURNING id, balance
+                ),
+                inserted AS (
+                    INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
+                    SELECT id, 'debit', %s, balance
+                    FROM updated
+                    RETURNING id
+                )
+                SELECT
+                    (SELECT balance FROM updated) AS balance,
+                    (SELECT id FROM inserted) AS transaction_id;
                 """,
-                (payload.amount, user_id_str, payload.amount),
+                (payload.amount, user_id_str, payload.amount, payload.amount),
             )
-            wallet = cur.fetchone()
+            mutation = cur.fetchone()
 
-            if wallet is None:
+            if mutation is None or mutation["transaction_id"] is None:
                 cur.execute("SELECT 1 FROM wallets WHERE user_id = %s", (user_id_str,))
                 exists = cur.fetchone()
                 conn.rollback()
@@ -193,28 +205,18 @@ def debit_wallet(user_id: str, payload: MoneyRequest) -> WalletMutationResponse:
                     "debit_insufficient_funds user_id=%s amount=%s", user_id_str, payload.amount
                 )
                 raise HTTPException(status_code=400, detail="insufficient funds")
-
-            cur.execute(
-                """
-                INSERT INTO ledger_entries (wallet_id, entry_type, amount, balance_after)
-                VALUES (%s, 'debit', %s, %s)
-                RETURNING id;
-                """,
-                (wallet["id"], payload.amount, wallet["balance"]),
-            )
-            tx = cur.fetchone()
             conn.commit()
 
     logger.info(
         "debit_success user_id=%s transaction_id=%s balance=%s",
         user_id_str,
-        tx["id"],
-        wallet["balance"],
+        mutation["transaction_id"],
+        mutation["balance"],
     )
     return WalletMutationResponse(
         user_id=user_id_str,
-        balance=wallet["balance"],
-        transaction_id=tx["id"],
+        balance=mutation["balance"],
+        transaction_id=mutation["transaction_id"],
     )
 
 
