@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -23,9 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_ledger_wallet_created_at
 ON ledger_entries(wallet_id, created_at ASC);
 
 
-SELECT * FROM ledger_entries;
-SELECT * FROM wallets;
-SELECT * FROM users;
+
 
 TRUNCATE TABLE users CASCADE;
 TRUNCATE TABLE wallets CASCADE;

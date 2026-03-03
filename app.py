@@ -33,7 +33,17 @@ async def lifespan(_app: FastAPI):
         logger.info("app_shutdown_complete")
 
 
-app = FastAPI(title=APP_NAME, version=APP_VERSION, lifespan=lifespan)
+app = FastAPI(
+    title=APP_NAME,
+    version=APP_VERSION,
+    lifespan=lifespan,
+    openapi_tags=[
+        {"name": "auth", "description": "Register and login APIs"},
+        {"name": "users", "description": "User management APIs"},
+        {"name": "wallet", "description": "Wallet and ledger APIs"},
+        {"name": "health", "description": "Health check API"},
+    ],
+)
 app.include_router(router)
 app.include_router(auth_router)
 

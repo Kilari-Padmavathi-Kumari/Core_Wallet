@@ -23,6 +23,7 @@ class CreateWalletRequest(BaseModel):
 
 class CreateUserRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=6, max_length=128)
 
 
 class UserResponse(BaseModel):
@@ -32,6 +33,12 @@ class UserResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=6, max_length=128)
+
+
+class RegisterRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=6, max_length=128)
 
 
 class TokenResponse(BaseModel):

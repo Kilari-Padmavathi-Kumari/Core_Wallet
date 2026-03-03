@@ -17,8 +17,13 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS users (
         user_id TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    """,
+    """
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT '';
     """,
     """
     CREATE TABLE IF NOT EXISTS wallets (
