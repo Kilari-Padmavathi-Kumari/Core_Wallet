@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import app
 
 DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:localhost@localhost:5432/walletdb"
+    "DATABASE_URL", "postgresql://postgres:localhost@localhost:5432/newwallet_db"
 )
 
 
@@ -185,11 +185,15 @@ def test_concurrent_debit_consistency(client: TestClient):
     )
 
     def do_debit():
-        return client.post(
-            f"/wallets/{user_id}/debit",
-            json={"amount": str(debit_amount)},
-            headers=headers,
-        ).status_code
+        for _ in range(5):
+            response = client.post(
+                f"/wallets/{user_id}/debit",
+                json={"amount": str(debit_amount)},
+                headers=headers,
+            )
+            if response.status_code != 409:
+                return response.status_code
+        return 409
 
     statuses: list[int] = []
     with ThreadPoolExecutor(max_workers=50) as executor:
@@ -199,9 +203,8 @@ def test_concurrent_debit_consistency(client: TestClient):
 
     success_count = statuses.count(200)
     insufficient_count = statuses.count(400)
-    print(
-        f"PHASE2_RESULT: successful_debits={success_count}, failed_debits={insufficient_count}"
-    )
+    conflict_count = statuses.count(409)
+    print(f"{success_count} passed {insufficient_count} fail")
 
     assert success_count == expected_success, (
         f"Expected {expected_success} successful debits, got {success_count}"
@@ -209,6 +212,7 @@ def test_concurrent_debit_consistency(client: TestClient):
     assert insufficient_count == expected_failures, (
         f"Expected {expected_failures} failed debits, got {insufficient_count}"
     )
+    assert conflict_count == 0, f"Unexpected OCC conflicts after retries: {conflict_count}"
     assert len(statuses) == request_count, (
         f"Expected {request_count} total debit responses, got {len(statuses)}"
     )

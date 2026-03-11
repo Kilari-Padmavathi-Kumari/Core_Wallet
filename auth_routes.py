@@ -13,12 +13,12 @@ router = APIRouter(tags=["auth"])
 
 
 @router.post("/auth/register", response_model=UserResponse, status_code=201)
-def register(payload: RegisterRequest) -> UserResponse:
+async def register(payload: RegisterRequest) -> UserResponse:
     """Register user with user_id and password."""
     try:
-        with pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
                     """
                     INSERT INTO users (user_id, password_hash)
                     VALUES (%s, %s)
@@ -27,8 +27,8 @@ def register(payload: RegisterRequest) -> UserResponse:
                     """,
                     (payload.user_id, hash_password(payload.password)),
                 )
-                row = cur.fetchone()
-                conn.commit()
+                row = await cur.fetchone()
+                await conn.commit()
     except psycopg.Error as exc:
         logger.exception("register_db_error user_id=%s error=%s", payload.user_id, exc)
         raise HTTPException(
@@ -48,7 +48,7 @@ def register(payload: RegisterRequest) -> UserResponse:
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-def login(payload: LoginRequest) -> TokenResponse:
+async def login(payload: LoginRequest) -> TokenResponse:
     """
     Simple login:
     - user must already exist in users table
@@ -56,13 +56,13 @@ def login(payload: LoginRequest) -> TokenResponse:
     - then return JWT
     """
     try:
-        with pool.connection() as conn:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+        async with pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cur:
+                await cur.execute(
                     "SELECT user_id, password_hash FROM users WHERE user_id = %s;",
                     (payload.user_id,),
                 )
-                user = cur.fetchone()
+                user = await cur.fetchone()
     except psycopg.Error as exc:
         logger.exception("login_db_error user_id=%s error=%s", payload.user_id, exc)
         raise HTTPException(

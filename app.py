@@ -21,15 +21,15 @@ logger = logging.getLogger("wallet.app")
 async def lifespan(_app: FastAPI):
     # Application startup: open DB pool and ensure tables exist.
     logger.info("app_startup_begin")
-    pool.open()
-    init_db()
+    await pool.open()
+    await init_db()
     logger.info("app_startup_complete")
     try:
         yield
     finally:
         # Application shutdown: close DB pool cleanly.
         logger.info("app_shutdown_begin")
-        pool.close()
+        await pool.close()
         logger.info("app_shutdown_complete")
 
 
@@ -69,9 +69,9 @@ async def request_logging_middleware(request: Request, call_next):
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])
-def health() -> HealthResponse:
+async def health() -> HealthResponse:
     # Health endpoint used by monitoring systems.
-    healthy = db_healthcheck()
+    healthy = await db_healthcheck()
     return HealthResponse(
         status="healthy" if healthy else "unhealthy",
         service=APP_NAME,

@@ -6,8 +6,8 @@
             "server": "localhost",
             "port": 5432,
             "driver": "PostgreSQL",
-            "name": "Wallet",
-            "database": "walletdb",
+            "name": "Pccwallet_db",
+            "database": "pccwallet_db",
             "username": "postgres"
         }
     ]
