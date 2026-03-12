@@ -11,9 +11,6 @@ CREATE TABLE IF NOT EXISTS wallets (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-ALTER TABLE wallets
-DROP COLUMN IF EXISTS version;
-
 CREATE TABLE IF NOT EXISTS ledger_entries (
     id BIGSERIAL PRIMARY KEY,
     wallet_id BIGINT NOT NULL REFERENCES wallets(id) ON DELETE CASCADE,
@@ -26,9 +23,4 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 CREATE INDEX IF NOT EXISTS idx_ledger_wallet_created_at
 ON ledger_entries(wallet_id, created_at ASC);
 
-
-
-
-TRUNCATE TABLE users CASCADE;
-TRUNCATE TABLE wallets CASCADE;
-TRUNCATE TABLE ledger_entries CASCADE;
+TRUNCATE TABLE ledger_entries, wallets, users RESTART IDENTITY CASCADE;

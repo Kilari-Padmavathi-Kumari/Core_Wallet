@@ -1,11 +1,14 @@
 import logging
 
-import psycopg
-from fastapi import APIRouter, HTTPException, status
-from psycopg.rows import dict_row
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import create_access_token, hash_password, verify_password
-from db import pool
+from db import get_session
+from models import User
 from schemas import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 
 logger = logging.getLogger("wallet.auth")
@@ -13,23 +16,22 @@ router = APIRouter(tags=["auth"])
 
 
 @router.post("/auth/register", response_model=UserResponse, status_code=201)
-async def register(payload: RegisterRequest) -> UserResponse:
+async def register(
+    payload: RegisterRequest,
+    session: AsyncSession = Depends(get_session),
+) -> UserResponse:
     """Register user with user_id and password."""
     try:
-        async with pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    """
-                    INSERT INTO users (user_id, password_hash)
-                    VALUES (%s, %s)
-                    ON CONFLICT (user_id) DO NOTHING
-                    RETURNING user_id, created_at;
-                    """,
-                    (payload.user_id, hash_password(payload.password)),
-                )
-                row = await cur.fetchone()
-                await conn.commit()
-    except psycopg.Error as exc:
+        async with session.begin():
+            stmt = (
+                pg_insert(User)
+                .values(user_id=payload.user_id, password_hash=hash_password(payload.password))
+                .on_conflict_do_nothing(index_elements=[User.user_id])
+                .returning(User.user_id, User.created_at)
+            )
+            result = await session.execute(stmt)
+            row = result.mappings().first()
+    except SQLAlchemyError as exc:
         logger.exception("register_db_error user_id=%s error=%s", payload.user_id, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -48,7 +50,10 @@ async def register(payload: RegisterRequest) -> UserResponse:
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-async def login(payload: LoginRequest) -> TokenResponse:
+async def login(
+    payload: LoginRequest,
+    session: AsyncSession = Depends(get_session),
+) -> TokenResponse:
     """
     Simple login:
     - user must already exist in users table
@@ -56,14 +61,11 @@ async def login(payload: LoginRequest) -> TokenResponse:
     - then return JWT
     """
     try:
-        async with pool.connection() as conn:
-            async with conn.cursor(row_factory=dict_row) as cur:
-                await cur.execute(
-                    "SELECT user_id, password_hash FROM users WHERE user_id = %s;",
-                    (payload.user_id,),
-                )
-                user = await cur.fetchone()
-    except psycopg.Error as exc:
+        result = await session.execute(
+            select(User.user_id, User.password_hash).where(User.user_id == payload.user_id)
+        )
+        user = result.mappings().first()
+    except SQLAlchemyError as exc:
         logger.exception("login_db_error user_id=%s error=%s", payload.user_id, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

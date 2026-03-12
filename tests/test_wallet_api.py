@@ -1,22 +1,34 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 import os
-import sys
 import secrets
+import sys
 from decimal import Decimal
 from pathlib import Path
 
-import psycopg
 import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import create_async_engine
 
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import app
+from models import LedgerEntry, User, Wallet
 
 DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:localhost@localhost:5432/newwallet_db"
+    "DATABASE_URL", "postgresql://postgres:localhost@localhost:5432/pccwallet_db"
 )
+
+
+def _normalize_database_url(url: str) -> str:
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
+
+
+ENGINE = create_async_engine(_normalize_database_url(DATABASE_URL))
 
 
 @pytest.fixture(scope="module")
@@ -27,12 +39,13 @@ def client():
 
 @pytest.fixture(scope="function", autouse=True)
 def clean_db():
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "TRUNCATE TABLE ledger_entries, wallets, users RESTART IDENTITY CASCADE;"
-            )
-        conn.commit()
+    async def _truncate() -> None:
+        async with ENGINE.begin() as conn:
+            await conn.execute(delete(LedgerEntry))
+            await conn.execute(delete(Wallet))
+            await conn.execute(delete(User))
+
+    asyncio.run(_truncate())
 
 
 def test_health(client: TestClient):

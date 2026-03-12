@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import secrets
+import sys
 import time
 from contextlib import asynccontextmanager
 
@@ -8,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from auth_routes import router as auth_router
 from config import APP_ENV, APP_NAME, APP_VERSION
-from db import db_healthcheck, init_db, pool
+from db import db_healthcheck, engine, init_db
 from logging_setup import setup_logging
 from routes import router
 from schemas import HealthResponse
@@ -16,20 +18,22 @@ from schemas import HealthResponse
 setup_logging()
 logger = logging.getLogger("wallet.app")
 
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Application startup: open DB pool and ensure tables exist.
+    # Application startup: ensure tables exist.
     logger.info("app_startup_begin")
-    await pool.open()
     await init_db()
     logger.info("app_startup_complete")
     try:
         yield
     finally:
-        # Application shutdown: close DB pool cleanly.
+        # Application shutdown: close DB connections cleanly.
         logger.info("app_shutdown_begin")
-        await pool.close()
+        await engine.dispose()
         logger.info("app_shutdown_complete")
 
 

@@ -10,7 +10,7 @@ APP_VERSION = os.getenv("APP_VERSION", "1.1.0")
 APP_ENV = os.getenv("APP_ENV", "development")
 
 DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql://postgres:localhost@localhost:5432/pccwallet_db"
+    "DATABASE_URL", "postgresql+psycopg://postgres:localhost@localhost:5432/pccwallet_db"
 )
 MONEY_QUANT = Decimal("0.01")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
